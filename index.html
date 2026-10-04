@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="NWSXPLR — National Weather Service Explore. Live NWS stations, forecasts, alerts, and NEXRAD radar for the United States." />
+  <meta name="theme-color" content="#070a10" />
+  <title>NWSXPLR — National Weather Service Explore</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='42' fill='none' stroke='%2306b6d4' stroke-width='5'/%3E%3Cpath d='M30 55 Q50 25 70 55' fill='none' stroke='%23f59e0b' stroke-width='4' stroke-linecap='round'/%3E%3Ccircle cx='50' cy='58' r='6' fill='%2306b6d4'/%3E%3C/svg%3E" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <!-- Boot screen -->
+  <div id="boot-screen">
+    <div class="boot-inner">
+      <div class="boot-logo" id="boot-logo">
+        <svg viewBox="0 0 120 120" width="96" height="96" aria-hidden="true">
+          <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(6,182,212,0.25)" stroke-width="1.5"/>
+          <circle cx="60" cy="60" r="38" fill="none" stroke="rgba(245,158,11,0.35)" stroke-width="1"/>
+          <!-- animated weather arcs -->
+          <path class="wx-arc a1" d="M28 62 Q60 22 92 62" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round"/>
+          <path class="wx-arc a2" d="M36 68 Q60 38 84 68" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="60" cy="70" r="7" fill="#06b6d4"/>
+          <circle class="orbit-dot" cx="60" cy="22" r="3.5" fill="#f59e0b"/>
+          <circle class="orbit-dot d2" cx="60" cy="22" r="2.5" fill="#22c55e"/>
+        </svg>
+      </div>
+      <h1 class="boot-title">NWSXPLR</h1>
+      <p class="boot-sub">NATIONAL WEATHER SERVICE EXPLORE</p>
+      <div class="boot-bar"><div class="boot-progress" id="boot-progress"></div></div>
+      <p class="boot-status" id="boot-status">CONNECTING TO NWS…</p>
+      <p class="boot-meta">api.weather.gov · NEXRAD · ALERTS · FORECASTS</p>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <header id="topbar">
+      <div class="brand" id="brand-refresh" title="Soft refresh — click logo">
+        <span class="brand-mark brand-mark-anim"></span>
+        <span class="brand-name">NWSXPLR</span>
+        <span class="brand-ver">NWS</span>
+      </div>
+      <div class="status-cluster">
+        <div class="stat"><span class="stat-label">STATIONS</span><span class="stat-val" id="stat-stations">—</span></div>
+        <div class="stat"><span class="stat-label">ALERTS</span><span class="stat-val" id="stat-alerts">—</span></div>
+        <div class="stat"><span class="stat-label">SELECTED</span><span class="stat-val" id="stat-selected">—</span></div>
+        <div class="stat"><span class="stat-label">RADAR</span><span class="stat-val" id="stat-radar">OFF</span></div>
+      </div>
+      <div class="clock-cluster">
+        <div class="clock" id="clock-zulu">00:00:00<span>Z</span></div>
+        <div class="api-status" id="api-status" data-state="connecting"><span class="dot"></span><span id="api-status-text">CONNECTING</span></div>
+      </div>
+      <div class="top-actions">
+        <select id="autorefresh-select" class="ctrl-select" title="Auto-refresh interval">
+          <option value="0">Manual</option>
+          <option value="60" selected>1 min</option>
+          <option value="120">2 min</option>
+          <option value="300">5 min</option>
+        </select>
+        <button class="icon-btn" id="btn-audio" title="Toggle alert tones">🔊</button>
+        <button class="icon-btn" id="btn-refresh" title="Refresh data">⟳</button>
+        <button class="icon-btn" id="btn-fullscreen" title="Fullscreen">⛶</button>
+      </div>
+    </header>
+
+    <main id="main" class="cols-4">
+      <!-- COLUMN 1: Stations list + search + radar controls -->
+      <aside id="left-panel" class="panel">
+        <div class="panel-section favorites-section">
+          <div class="section-head"><h2>Favorites</h2></div>
+          <div class="fav-grid" id="fav-grid">
+            <button type="button" class="fav-btn" data-code="PHI" title="Philadelphia / Mount Holly, NJ">PHI<span>Mt Holly NJ</span></button>
+            <button type="button" class="fav-btn" data-code="TBW" title="Tampa Bay, FL">TBW<span>Tampa FL</span></button>
+            <button type="button" class="fav-btn" data-code="SGX" title="San Diego, CA">SGX<span>San Diego</span></button>
+            <button type="button" class="fav-btn" data-code="CYS" title="Cheyenne / Tie Siding, WY">CYS<span>Tie Siding WY</span></button>
+            <button type="button" class="fav-btn" data-code="BGM" title="Binghamton / Wilkes-Barre, PA">BGM<span>Wilkes-Barre</span></button>
+          </div>
+        </div>
+        <div class="panel-section">
+          <div class="section-head"><h2>NWS Stations</h2></div>
+          <input type="search" id="station-search" class="search-box" placeholder="Search state, city, code, zip, county…" autocomplete="off" />
+          <div class="seg-control" id="state-filter-seg">
+            <button data-filter="all" class="active">All</button>
+            <button data-filter="active">With Alerts</button>
+          </div>
+        </div>
+        <div class="panel-section flex-grow scroll-y" id="station-list-wrap">
+          <div id="station-list" class="station-list"></div>
+        </div>
+        <div class="panel-section radar-controls">
+          <div class="section-head"><h2>NEXRAD / Layers</h2></div>
+          <div class="layer-toggles" id="radar-layers">
+            <label class="layer-row"><input type="checkbox" id="layer-stations" checked /><span class="layer-swatch stations"></span>WFO Stations</label>
+            <label class="layer-row"><input type="checkbox" id="layer-alerts" checked /><span class="layer-swatch alerts"></span>Alert Polygons</label>
+            <label class="layer-row"><input type="checkbox" id="layer-radar" /><span class="layer-swatch radar"></span>NEXRAD Base Reflectivity</label>
+            <label class="layer-row"><input type="checkbox" id="layer-radar-vel" /><span class="layer-swatch radar-vel"></span>NEXRAD Velocity</label>
+            <label class="layer-row"><input type="checkbox" id="layer-satellite" /><span class="layer-swatch satellite"></span>GOES Infrared</label>
+            <label class="layer-row"><input type="checkbox" id="layer-precip" /><span class="layer-swatch precip"></span>QPE Precipitation</label>
+          </div>
+          <div class="field-row" style="margin-top:8px">
+            <label>Radar opacity</label>
+            <input type="range" id="radar-opacity" min="10" max="100" value="65" />
+          </div>
+        </div>
+      </aside>
+
+      <!-- COLUMN 2: Map -->
+      <section id="map-panel" class="panel map-panel">
+        <div id="map"></div>
+        <div class="map-overlay-top">
+          <button class="map-chip" id="btn-fit-usa" title="Fit USA">🇺🇸 USA</button>
+          <button class="map-chip" id="btn-fit-selected" title="Zoom to selected">⌖ Selected</button>
+        </div>
+        <div class="map-legend" id="map-legend">
+          <span class="leg"><i class="dot-wfo"></i> WFO</span>
+          <span class="leg"><i class="dot-alert extreme"></i> Extreme</span>
+          <span class="leg"><i class="dot-alert severe"></i> Severe</span>
+          <span class="leg"><i class="dot-alert moderate"></i> Moderate</span>
+          <span class="leg"><i class="dot-alert minor"></i> Minor</span>
+        </div>
+      </section>
+
+      <!-- COLUMN 3: Forecast / station detail -->
+      <aside id="detail-panel" class="panel">
+        <div class="panel-section">
+          <div class="section-head"><h2>Station / Forecast</h2></div>
+          <div id="detail-empty" class="empty-state">
+            <p>Select a WFO station from the list or map to load forecast, observations, and office data.</p>
+          </div>
+          <div id="detail-content" class="hidden">
+            <div class="detail-header">
+              <div class="detail-code" id="detail-code">—</div>
+              <div class="detail-name" id="detail-name">—</div>
+              <div class="detail-meta" id="detail-meta">—</div>
+            </div>
+            <div class="detail-tabs">
+              <button class="tab active" data-tab="forecast">Forecast</button>
+              <button class="tab" data-tab="obs">Observations</button>
+              <button class="tab" data-tab="office">Office</button>
+              <button class="tab" data-tab="raw">API</button>
+            </div>
+            <div class="tab-pane active" id="tab-forecast"></div>
+            <div class="tab-pane" id="tab-obs"></div>
+            <div class="tab-pane" id="tab-office"></div>
+            <div class="tab-pane" id="tab-raw"></div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- COLUMN 4: Alerts -->
+      <aside id="alerts-panel" class="panel">
+        <div class="panel-section">
+          <div class="section-head">
+            <h2>Active Alerts</h2>
+            <span class="badge" id="alerts-count">0</span>
+          </div>
+          <input type="search" id="alert-search" class="search-box" placeholder="Search alerts by event, area, severity…" autocomplete="off" />
+          <div class="seg-control" id="severity-seg">
+            <button data-sev="all" class="active">All</button>
+            <button data-sev="Extreme">Extreme</button>
+            <button data-sev="Severe">Severe</button>
+            <button data-sev="Moderate">Moderate</button>
+            <button data-sev="Minor">Minor</button>
+          </div>
+        </div>
+        <div class="panel-section flex-grow scroll-y" id="alerts-list-wrap">
+          <div id="alerts-empty" class="empty-state">
+            <p>No station selected — or no active alerts for this office.</p>
+          </div>
+          <div id="alerts-list" class="alerts-list"></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="js/wfo-data.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
