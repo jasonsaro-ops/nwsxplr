@@ -16,7 +16,13 @@
   };
 
   // Iowa State Mesonet radar tiles (public, no key)
+  // Animation frames: 50 min ago → live
+  const RADAR_FRAMES = ['m50m', 'm45m', 'm40m', 'm35m', 'm30m', 'm25m', 'm20m', 'm15m', 'm10m', 'm05m', ''];
   const RADAR = {
+    baseReflTpl: (frame) =>
+      `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q${frame ? '-' + frame : ''}-900913/{z}/{x}/{y}.png`,
+    velocityTpl: (frame) =>
+      `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0v${frame ? '-' + frame : ''}-900913/{z}/{x}/{y}.png`,
     baseRefl: 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png',
     velocity: 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0v-900913/{z}/{x}/{y}.png',
     goesIR: 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/goes-ir-4km-900913/{z}/{x}/{y}.png',
@@ -49,7 +55,12 @@
     },
     markers: new Map(),
     knownAlertIds: new Set(),
-    firstAlertLoad: true
+    firstAlertLoad: true,
+    radarFrame: RADAR_FRAMES.length - 1,
+    radarPlaying: false,
+    radarTimer: null,
+    radarSpeed: 1200,
+    lastObs: null
   };
 
   // ── DOM ──
@@ -133,7 +144,7 @@
       center: [39.5, -98.35],
       zoom: 4,
       minZoom: 3,
-      maxZoom: 12,
+      maxZoom: 18,
       zoomControl: true,
       attributionControl: true,
       preferCanvas: true
@@ -143,16 +154,15 @@
       'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
       {
         attribution: 'Esri · OpenStreetMap · NWS · Iowa State Mesonet',
-        maxZoom: 16,
+        maxZoom: 18,
         maxNativeZoom: 16
       }
     );
     basemap.addTo(state.map);
 
-    // Reference labels (also free, no key)
     L.tileLayer(
       'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
-      { maxZoom: 16, maxNativeZoom: 16, opacity: 0.85, pane: 'overlayPane' }
+      { maxZoom: 18, maxNativeZoom: 16, opacity: 0.85, pane: 'overlayPane' }
     ).addTo(state.map);
 
     state.layers.stations = L.layerGroup().addTo(state.map);
@@ -161,20 +171,24 @@
     // Radar layers (off by default) — public Iowa State Mesonet, no key
     state.layers.radar = L.tileLayer(RADAR.baseRefl, {
       opacity: 0.65,
-      maxZoom: 12,
+      maxZoom: 18,
+      maxNativeZoom: 12,
       attribution: 'NEXRAD · Iowa State Mesonet'
     });
     state.layers.radarVel = L.tileLayer(RADAR.velocity, {
       opacity: 0.55,
-      maxZoom: 12
+      maxZoom: 18,
+      maxNativeZoom: 12
     });
     state.layers.satellite = L.tileLayer(RADAR.goesIR, {
       opacity: 0.5,
-      maxZoom: 10
+      maxZoom: 14,
+      maxNativeZoom: 10
     });
     state.layers.precip = L.tileLayer(RADAR.qpe, {
       opacity: 0.6,
-      maxZoom: 10
+      maxZoom: 14,
+      maxNativeZoom: 10
     });
 
     // Keep center correct on resize
@@ -381,8 +395,8 @@
     renderStationList();
     $$('.fav-btn').forEach((b) => b.classList.toggle('active', b.dataset.code === code));
 
-    // Zoom
-    state.map.setView([st.lat, st.lon], Math.max(state.map.getZoom(), 7), { animate: true });
+    // Zoom in closer on selected WFO
+    state.map.setView([st.lat, st.lon], Math.max(state.map.getZoom(), 9), { animate: true });
 
     // Show detail shell
     $('#detail-empty').classList.add('hidden');
@@ -434,7 +448,12 @@
         $('#tab-forecast').innerHTML = '<p class="empty-state">No forecast periods returned.</p>';
         return;
       }
-      let html = '';
+      let strip = '<div class="forecast-strip">';
+      periods.slice(0, 8).forEach((p) => {
+        strip += `<div class="fp-chip"><div class="fc-name">${esc(p.name)}</div><div class="fc-temp">${p.temperature}°</div><div class="fc-short">${esc(p.shortForecast || '')}</div></div>`;
+      });
+      strip += '</div>';
+      let html = strip;
       periods.slice(0, 14).forEach((p) => {
         html += `<div class="forecast-period">
           <div class="fp-name">${esc(p.name)}</div>
@@ -461,69 +480,167 @@
     }
   }
 
+  function cToF(c) {
+    return c == null ? null : c * 9 / 5 + 32;
+  }
+  function msToMph(ms) {
+    return ms == null ? null : ms * 2.237;
+  }
+  function paToInHg(pa) {
+    return pa == null ? null : pa / 3386.39;
+  }
+
+  function arcGaugeSvg(value, min, max, color, label, unit, displayVal) {
+    const pct = value == null || isNaN(value) ? 0 : Math.max(0, Math.min(1, (value - min) / (max - min)));
+    const start = -135;
+    const sweep = 270;
+    const angle = start + sweep * pct;
+    const r = 42;
+    const cx = 50;
+    const cy = 50;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const x1 = cx + r * Math.cos(toRad(start));
+    const y1 = cy + r * Math.sin(toRad(start));
+    const x2 = cx + r * Math.cos(toRad(start + sweep));
+    const y2 = cy + r * Math.sin(toRad(start + sweep));
+    const nx = cx + r * Math.cos(toRad(angle));
+    const ny = cy + r * Math.sin(toRad(angle));
+    const large = sweep * pct > 180 ? 1 : 0;
+    const track = `M ${x1} ${y1} A ${r} ${r} 0 1 1 ${x2} ${y2}`;
+    const fill = value == null ? '' : `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${nx} ${ny}`;
+    const shown = displayVal != null ? displayVal : (value == null ? '—' : Math.round(value));
+    return `<div class="g-title">${esc(label)}</div>
+      <svg class="gauge-svg" viewBox="0 0 100 78" aria-hidden="true">
+        <path d="${track}" fill="none" stroke="rgba(148,163,184,0.2)" stroke-width="8" stroke-linecap="round"/>
+        ${fill ? `<path d="${fill}" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round"/>` : ''}
+        <text x="50" y="52" text-anchor="middle" fill="#f8fafc" font-size="16" font-family="IBM Plex Mono, monospace" font-weight="600">${esc(String(shown))}</text>
+        <text x="50" y="66" text-anchor="middle" fill="#64748b" font-size="8" font-family="IBM Plex Mono, monospace">${esc(unit)}</text>
+      </svg>`;
+  }
+
+  function compassSvg(deg, speedMph) {
+    const d = deg == null || isNaN(deg) ? 0 : deg;
+    const spd = speedMph == null ? '—' : speedMph.toFixed(1);
+    const dir = deg == null ? '—' : Math.round(deg) + '°';
+    return `<div class="g-title">Wind</div>
+      <svg class="compass-rose" viewBox="0 0 100 100" aria-hidden="true">
+        <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(148,163,184,0.25)" stroke-width="2"/>
+        <circle cx="50" cy="50" r="32" fill="none" stroke="rgba(148,163,184,0.12)" stroke-width="1"/>
+        <text x="50" y="14" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="IBM Plex Mono,monospace">N</text>
+        <text x="90" y="53" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="IBM Plex Mono,monospace">E</text>
+        <text x="50" y="94" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="IBM Plex Mono,monospace">S</text>
+        <text x="10" y="53" text-anchor="middle" fill="#94a3b8" font-size="8" font-family="IBM Plex Mono,monospace">W</text>
+        <g class="needle" style="transform:rotate(${d}deg)">
+          <polygon points="50,18 54,50 50,46 46,50" fill="#f59e0b"/>
+          <polygon points="50,82 54,50 50,54 46,50" fill="rgba(148,163,184,0.45)"/>
+          <circle cx="50" cy="50" r="4" fill="#06b6d4"/>
+        </g>
+      </svg>
+      <div class="g-value" style="font-size:14px">${esc(spd)} <span class="g-unit">mph</span></div>
+      <div style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">${esc(dir)}</div>`;
+  }
+
+  function renderDashboard(obs) {
+    const tempF = obs.tempF;
+    const rh = obs.rh;
+    const windMph = obs.windMph;
+    const windDeg = obs.windDeg;
+    const colorTemp = tempF == null ? '#64748b' : tempF < 32 ? '#3b82f6' : tempF > 90 ? '#ef4444' : tempF > 75 ? '#f97316' : '#22c55e';
+    const colorRh = '#eab308';
+    const colorWind = '#06b6d4';
+
+    const gt = $('#gauge-temp');
+    const gh = $('#gauge-humid');
+    const gw = $('#gauge-wind');
+    const gc = $('#gauge-compass');
+    if (gt) gt.innerHTML = arcGaugeSvg(tempF, -20, 110, colorTemp, 'Temperature', '°F', tempF == null ? '—' : tempF.toFixed(0));
+    if (gh) gh.innerHTML = arcGaugeSvg(rh, 0, 100, colorRh, 'Humidity', '%', rh == null ? '—' : Math.round(rh));
+    if (gw) gw.innerHTML = arcGaugeSvg(windMph, 0, 60, colorWind, 'Wind speed', 'mph', windMph == null ? '—' : windMph.toFixed(0));
+    if (gc) gc.innerHTML = compassSvg(windDeg, windMph);
+
+    const mini = $('#obs-mini-grid');
+    if (mini) {
+      const uv = obs.uvIndex;
+      const uvPct = uv == null ? 0 : Math.min(100, (uv / 11) * 100);
+      mini.innerHTML = `
+        <div class="obs-mini"><div class="om-label">Feels like</div><div class="om-val">${obs.feelsF == null ? '—' : obs.feelsF.toFixed(1) + ' °F'}</div></div>
+        <div class="obs-mini"><div class="om-label">Dewpoint</div><div class="om-val">${obs.dewF == null ? '—' : obs.dewF.toFixed(1) + ' °F'}</div></div>
+        <div class="obs-mini"><div class="om-label">Pressure</div><div class="om-val">${obs.pressInHg == null ? '—' : obs.pressInHg.toFixed(2) + ' inHg'}</div></div>
+        <div class="obs-mini"><div class="om-label">Visibility</div><div class="om-val">${obs.visMi == null ? '—' : obs.visMi.toFixed(1) + ' mi'}</div></div>
+        <div class="obs-mini"><div class="om-label">Gust</div><div class="om-val">${obs.gustMph == null ? '—' : obs.gustMph.toFixed(1) + ' mph'}</div></div>
+        <div class="obs-mini"><div class="om-label">Station</div><div class="om-val" style="font-size:11px">${esc(obs.sid || '—')}</div></div>
+        <div class="uv-bar-wrap">
+          <div class="om-label">UV Index ${uv == null ? '' : '· ' + uv}</div>
+          <div class="uv-bar-track"><div class="uv-bar-marker" style="left:${uvPct}%"></div></div>
+        </div>`;
+    }
+    const cond = $('#detail-cond');
+    if (cond) cond.textContent = obs.text || '';
+  }
+
   async function loadObservations(st) {
     try {
-      // Nearest stations from points already fetched, or stations endpoint
-      const stationsUrl = `${NWS.base}/stations?state=${st.state}&limit=20`;
       let obsHtml = '';
-      // Use observation stations near the WFO
       const pts = state._lastRaw && state._lastRaw.points;
       let obsStationId = null;
       if (pts && pts.properties && pts.properties.observationStations) {
-        // fetch the collection
         try {
           const coll = await fetchJson(pts.properties.observationStations);
           const feats = coll.features || [];
           if (feats[0]) obsStationId = feats[0].properties.stationIdentifier || feats[0].id;
         } catch (_) {}
       }
-      if (!obsStationId) {
-        // fallback: try code as station (many WFOs have ASOS with same city)
-        obsStationId = null;
-      }
 
       if (obsStationId) {
         const sid = String(obsStationId).replace(/.*\//, '');
         const latest = await fetchJson(`${NWS.base}/stations/${sid}/observations/latest`);
         const p = latest.properties || {};
-        const t = p.temperature && p.temperature.value != null
-          ? (p.temperature.value * 9 / 5 + 32).toFixed(1) + ' °F'
-          : '—';
-        const dew = p.dewpoint && p.dewpoint.value != null
-          ? (p.dewpoint.value * 9 / 5 + 32).toFixed(1) + ' °F'
-          : '—';
-        const rh = p.relativeHumidity && p.relativeHumidity.value != null
-          ? Math.round(p.relativeHumidity.value) + '%'
-          : '—';
-        const wind = p.windSpeed && p.windSpeed.value != null
-          ? (p.windSpeed.value * 2.237).toFixed(1) + ' mph'
-          : '—';
-        const gust = p.windGust && p.windGust.value != null
-          ? (p.windGust.value * 2.237).toFixed(1) + ' mph'
-          : '—';
-        const press = p.barometricPressure && p.barometricPressure.value != null
-          ? (p.barometricPressure.value / 100).toFixed(1) + ' hPa'
-          : '—';
-        const vis = p.visibility && p.visibility.value != null
-          ? (p.visibility.value / 1609.34).toFixed(1) + ' mi'
-          : '—';
-        const text = p.textDescription || '—';
+        const tempF = p.temperature && p.temperature.value != null ? cToF(p.temperature.value) : null;
+        const dewF = p.dewpoint && p.dewpoint.value != null ? cToF(p.dewpoint.value) : null;
+        const rh = p.relativeHumidity && p.relativeHumidity.value != null ? p.relativeHumidity.value : null;
+        const windMph = p.windSpeed && p.windSpeed.value != null ? msToMph(p.windSpeed.value) : null;
+        const gustMph = p.windGust && p.windGust.value != null ? msToMph(p.windGust.value) : null;
+        const windDeg = p.windDirection && p.windDirection.value != null ? p.windDirection.value : null;
+        const pressInHg = p.barometricPressure && p.barometricPressure.value != null
+          ? paToInHg(p.barometricPressure.value) : null;
+        const visMi = p.visibility && p.visibility.value != null ? p.visibility.value / 1609.34 : null;
+        const text = p.textDescription || '';
+        // Heat index / wind chill approximate "feels like"
+        let feelsF = tempF;
+        if (tempF != null && rh != null && tempF >= 80) {
+          // simplified heat index
+          feelsF = -42.379 + 2.04901523 * tempF + 10.14333127 * rh - 0.22475541 * tempF * rh
+            - 0.00683783 * tempF * tempF - 0.05481717 * rh * rh + 0.00122874 * tempF * tempF * rh
+            + 0.00085282 * tempF * rh * rh - 0.00000199 * tempF * tempF * rh * rh;
+        } else if (tempF != null && windMph != null && tempF <= 50 && windMph > 3) {
+          feelsF = 35.74 + 0.6215 * tempF - 35.75 * Math.pow(windMph, 0.16) + 0.4275 * tempF * Math.pow(windMph, 0.16);
+        }
+
+        const obs = {
+          tempF, dewF, rh, windMph, gustMph, windDeg, pressInHg, visMi,
+          feelsF, text, sid, uvIndex: null, timestamp: p.timestamp
+        };
+        state.lastObs = obs;
+        renderDashboard(obs);
+
         obsHtml = `<div class="obs-grid">
-          <div class="obs-card"><div class="label">Temperature</div><div class="value">${t}</div></div>
-          <div class="obs-card"><div class="label">Dewpoint</div><div class="value">${dew}</div></div>
-          <div class="obs-card"><div class="label">Humidity</div><div class="value">${rh}</div></div>
-          <div class="obs-card"><div class="label">Wind</div><div class="value">${wind}</div></div>
-          <div class="obs-card"><div class="label">Gust</div><div class="value">${gust}</div></div>
-          <div class="obs-card"><div class="label">Pressure</div><div class="value">${press}</div></div>
-          <div class="obs-card"><div class="label">Visibility</div><div class="value">${vis}</div></div>
-          <div class="obs-card"><div class="label">Conditions</div><div class="value" style="font-size:13px">${esc(text)}</div></div>
+          <div class="obs-card"><div class="label">Temperature</div><div class="value">${tempF == null ? '—' : tempF.toFixed(1) + ' °F'}</div></div>
+          <div class="obs-card"><div class="label">Feels like</div><div class="value">${feelsF == null ? '—' : feelsF.toFixed(1) + ' °F'}</div></div>
+          <div class="obs-card"><div class="label">Dewpoint</div><div class="value">${dewF == null ? '—' : dewF.toFixed(1) + ' °F'}</div></div>
+          <div class="obs-card"><div class="label">Humidity</div><div class="value">${rh == null ? '—' : Math.round(rh) + '%'}</div></div>
+          <div class="obs-card"><div class="label">Wind</div><div class="value">${windMph == null ? '—' : windMph.toFixed(1) + ' mph'}</div></div>
+          <div class="obs-card"><div class="label">Direction</div><div class="value">${windDeg == null ? '—' : Math.round(windDeg) + '°'}</div></div>
+          <div class="obs-card"><div class="label">Gust</div><div class="value">${gustMph == null ? '—' : gustMph.toFixed(1) + ' mph'}</div></div>
+          <div class="obs-card"><div class="label">Pressure</div><div class="value">${pressInHg == null ? '—' : pressInHg.toFixed(2) + ' inHg'}</div></div>
+          <div class="obs-card"><div class="label">Visibility</div><div class="value">${visMi == null ? '—' : visMi.toFixed(1) + ' mi'}</div></div>
+          <div class="obs-card"><div class="label">Conditions</div><div class="value" style="font-size:13px">${esc(text || '—')}</div></div>
         </div>
         <p style="margin-top:10px;font-size:11px;color:var(--text-dim);font-family:var(--font-mono)">Station ${esc(sid)} · ${esc(p.timestamp || '')}</p>`;
         state._lastRaw = state._lastRaw || {};
         state._lastRaw.observation = latest;
         renderRawTab();
       } else {
-        // Try points-based grid weather as fallback
+        renderDashboard({ tempF: null, rh: null, windMph: null, windDeg: null, dewF: null, feelsF: null, pressInHg: null, visMi: null, gustMph: null, text: '', sid: null });
         obsHtml = '<p class="empty-state">No nearby observation station resolved. Forecast still available.</p>';
       }
       $('#tab-obs').innerHTML = obsHtml;
@@ -723,10 +840,22 @@
       });
     }
 
-    // Station search
+    // Station search (+ zip → nearest WFO)
+    let searchTimer = null;
     $('#station-search').addEventListener('input', (e) => {
       state.search = e.target.value;
       renderStationList();
+      clearTimeout(searchTimer);
+      const q = state.search.trim();
+      if (/^\d{5}$/.test(q)) {
+        searchTimer = setTimeout(() => resolveZipToNearestWfo(q), 280);
+      }
+    });
+    $('#station-search').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const q = state.search.trim();
+        if (/^\d{5}$/.test(q)) resolveZipToNearestWfo(q);
+      }
     });
 
     // Station list click
@@ -834,17 +963,150 @@
     });
     $('#btn-audio').addEventListener('click', () => {
       state.audioEnabled = !state.audioEnabled;
-      $('#btn-audio').classList.toggle('active', state.audioEnabled);
-      $('#btn-audio').textContent = state.audioEnabled ? '🔔' : '🔊';
+      const btn = $('#btn-audio');
+      btn.classList.toggle('active', state.audioEnabled);
+      btn.setAttribute('aria-pressed', state.audioEnabled ? 'true' : 'false');
+      const on = btn.querySelector('.ico-tones-on');
+      const off = btn.querySelector('.ico-tones-off');
+      if (on && off) {
+        on.classList.toggle('hidden', !state.audioEnabled);
+        off.classList.toggle('hidden', state.audioEnabled);
+      }
       if (state.audioEnabled) {
         ensureAudio();
         playRefreshTone();
       }
     });
+
+    // Radar animation controls
+    const playBtn = $('#btn-radar-play');
+    const frameSlider = $('#radar-frame');
+    const speedSel = $('#radar-speed');
+    if (playBtn) {
+      playBtn.addEventListener('click', () => {
+        if (state.radarPlaying) stopRadarAnim();
+        else startRadarAnim();
+      });
+    }
+    if (frameSlider) {
+      frameSlider.max = String(RADAR_FRAMES.length - 1);
+      frameSlider.value = String(RADAR_FRAMES.length - 1);
+      frameSlider.addEventListener('input', (e) => {
+        stopRadarAnim();
+        setRadarFrame(Number(e.target.value));
+      });
+    }
+    if (speedSel) {
+      speedSel.addEventListener('change', (e) => {
+        state.radarSpeed = Number(e.target.value) || 1200;
+        if (state.radarPlaying) {
+          stopRadarAnim();
+          startRadarAnim();
+        }
+      });
+    }
     $('#autorefresh-select').addEventListener('change', (e) => {
       state.autoRefreshMs = Number(e.target.value) * 1000;
       scheduleAutoRefresh();
     });
+  }
+
+  // ── Radar animation ──
+  function setRadarFrame(idx) {
+    const i = Math.max(0, Math.min(RADAR_FRAMES.length - 1, idx));
+    state.radarFrame = i;
+    const frame = RADAR_FRAMES[i];
+    const label = $('#radar-frame-label');
+    if (label) label.textContent = frame ? frame.replace('m', '') + ' ago' : 'Live';
+    const slider = $('#radar-frame');
+    if (slider) slider.value = String(i);
+
+    if (state.layers.radar) {
+      state.layers.radar.setUrl(RADAR.baseReflTpl(frame));
+    }
+    if (state.layers.radarVel) {
+      state.layers.radarVel.setUrl(RADAR.velocityTpl(frame));
+    }
+  }
+
+  function startRadarAnim() {
+    // Ensure a radar layer is on
+    if (!$('#layer-radar')?.checked && !$('#layer-radar-vel')?.checked) {
+      const lr = $('#layer-radar');
+      if (lr) {
+        lr.checked = true;
+        lr.dispatchEvent(new Event('change'));
+      }
+    }
+    state.radarPlaying = true;
+    const btn = $('#btn-radar-play');
+    if (btn) {
+      btn.textContent = '⏸';
+      btn.classList.add('playing');
+    }
+    if (state.radarTimer) clearInterval(state.radarTimer);
+    state.radarTimer = setInterval(() => {
+      let next = state.radarFrame + 1;
+      if (next >= RADAR_FRAMES.length) next = 0;
+      setRadarFrame(next);
+    }, state.radarSpeed);
+  }
+
+  function stopRadarAnim() {
+    state.radarPlaying = false;
+    if (state.radarTimer) {
+      clearInterval(state.radarTimer);
+      state.radarTimer = null;
+    }
+    const btn = $('#btn-radar-play');
+    if (btn) {
+      btn.textContent = '▶';
+      btn.classList.remove('playing');
+    }
+  }
+
+  // ── Zip → nearest WFO ──
+  function haversineMi(lat1, lon1, lat2, lon2) {
+    const R = 3958.8;
+    const toR = (d) => (d * Math.PI) / 180;
+    const dLat = toR(lat2 - lat1);
+    const dLon = toR(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toR(lat1)) * Math.cos(toR(lat2)) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  async function resolveZipToNearestWfo(zip) {
+    try {
+      setApiStatus('connecting', 'ZIP…');
+      const res = await fetch(`https://api.zippopotam.us/us/${zip}`);
+      if (!res.ok) throw new Error('zip not found');
+      const data = await res.json();
+      const place = (data.places && data.places[0]) || null;
+      if (!place) throw new Error('no place');
+      const lat = parseFloat(place.latitude);
+      const lon = parseFloat(place.longitude);
+      let best = null;
+      let bestD = Infinity;
+      state.stations.forEach((s) => {
+        const d = haversineMi(lat, lon, s.lat, s.lon);
+        if (d < bestD) {
+          bestD = d;
+          best = s;
+        }
+      });
+      if (best) {
+        state.search = '';
+        const input = $('#station-search');
+        if (input) input.value = `${zip} → ${best.code}`;
+        renderStationList();
+        selectStation(best.code);
+        setApiStatus('ok', 'LIVE');
+      }
+    } catch (err) {
+      console.warn('Zip lookup failed', err);
+      setApiStatus('error', 'ZIP ERR');
+      setTimeout(() => setApiStatus('ok', 'LIVE'), 2000);
+    }
   }
 
   function softRefresh() {
@@ -858,11 +1120,10 @@
         loadOffice(st);
       }
     }
-    // Nudge radar tiles
-    [state.layers.radar, state.layers.radarVel, state.layers.satellite, state.layers.precip].forEach((ly) => {
-      if (ly && state.map.hasLayer(ly)) {
-        ly.redraw();
-      }
+    // Refresh radar at current frame
+    setRadarFrame(state.radarFrame);
+    [state.layers.satellite, state.layers.precip].forEach((ly) => {
+      if (ly && state.map.hasLayer(ly)) ly.redraw();
     });
   }
 

@@ -59,7 +59,10 @@
           <option value="120">2 min</option>
           <option value="300">5 min</option>
         </select>
-        <button class="icon-btn" id="btn-audio" title="Toggle alert tones">🔊</button>
+        <button class="icon-btn audio-btn" id="btn-audio" title="Toggle alert tones" aria-pressed="false">
+          <svg class="ico-tones-off" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+          <svg class="ico-tones-on hidden" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
+        </button>
         <button class="icon-btn" id="btn-refresh" title="Refresh data">⟳</button>
         <button class="icon-btn" id="btn-fullscreen" title="Fullscreen">⛶</button>
       </div>
@@ -103,6 +106,19 @@
             <label>Radar opacity</label>
             <input type="range" id="radar-opacity" min="10" max="100" value="65" />
           </div>
+          <div class="radar-anim-bar">
+            <button type="button" class="anim-btn" id="btn-radar-play" title="Play / pause radar loop">▶</button>
+            <input type="range" id="radar-frame" min="0" max="10" value="10" title="Radar frame" />
+            <span class="anim-label" id="radar-frame-label">Live</span>
+          </div>
+          <div class="field-row">
+            <label>Loop speed</label>
+            <select id="radar-speed" class="ctrl-select">
+              <option value="800">Fast</option>
+              <option value="1200" selected>Normal</option>
+              <option value="2000">Slow</option>
+            </select>
+          </div>
         </div>
       </aside>
 
@@ -124,7 +140,7 @@
 
       <!-- COLUMN 3: Forecast / station detail -->
       <aside id="detail-panel" class="panel">
-        <div class="panel-section">
+        <div class="panel-section flex-grow scroll-y">
           <div class="section-head"><h2>Station / Forecast</h2></div>
           <div id="detail-empty" class="empty-state">
             <p>Select a WFO station from the list or map to load forecast, observations, and office data.</p>
@@ -134,10 +150,23 @@
               <div class="detail-code" id="detail-code">—</div>
               <div class="detail-name" id="detail-name">—</div>
               <div class="detail-meta" id="detail-meta">—</div>
+              <div class="detail-cond" id="detail-cond"></div>
+            </div>
+            <!-- Live dashboard gauges (always visible when station selected) -->
+            <div id="wx-dashboard" class="wx-dashboard">
+              <div class="gauge-row">
+                <div class="gauge-card" id="gauge-temp"></div>
+                <div class="gauge-card" id="gauge-humid"></div>
+              </div>
+              <div class="gauge-row">
+                <div class="gauge-card" id="gauge-wind"></div>
+                <div class="gauge-card" id="gauge-compass"></div>
+              </div>
+              <div class="obs-mini-grid" id="obs-mini-grid"></div>
             </div>
             <div class="detail-tabs">
               <button class="tab active" data-tab="forecast">Forecast</button>
-              <button class="tab" data-tab="obs">Observations</button>
+              <button class="tab" data-tab="obs">Details</button>
               <button class="tab" data-tab="office">Office</button>
               <button class="tab" data-tab="raw">API</button>
             </div>
