@@ -9,8 +9,9 @@
   const NWS = {
     base: 'https://api.weather.gov',
     headers: {
-      Accept: 'application/geo+json',
-      'User-Agent': 'NWSXPLR/1.0 (github-pages; educational)'
+      Accept: 'application/geo+json, application/json',
+      // NWS asks for an identifying User-Agent (product + contact)
+      'User-Agent': 'NWSXPLR/1.1 (https://github.com; nwsxplr@local)'
     }
   };
 
@@ -63,8 +64,9 @@
     if (status) status.textContent = msg;
   }
 
-  async function boot() {
-    setBoot(10, 'LOADING WFO DIRECTORY…');
+  function boot() {
+    // Fast path: local data only — show UI immediately (no network wait)
+    setBoot(20, 'LOADING WFO DIRECTORY…');
     state.stations = (window.WFO_LIST || []).map((s) => ({
       ...s,
       key: `${s.state} ${s.name} ${s.code}`.toLowerCase(),
@@ -76,53 +78,87 @@
       return a.name.localeCompare(b.name);
     });
 
-    setBoot(30, 'INITIALIZING MAP…');
-    initMap();
-
-    setBoot(45, 'FETCHING ACTIVE ALERTS…');
-    await refreshAlerts(true);
-
-    setBoot(65, 'RENDERING STATIONS…');
-    renderStationList();
-    plotStations();
-
-    setBoot(80, 'WIRING CONTROLS…');
+    setBoot(50, 'OPENING UI…');
     bindUI();
-
-    setBoot(95, 'STARTING LIVE CLOCK…');
     startClock();
     scheduleAutoRefresh();
+    renderStationList();
+    $('#stat-stations').textContent = String(state.stations.length);
 
     setBoot(100, 'READY');
-    setTimeout(() => {
-      $('#boot-screen').classList.add('fade-out');
-      $('#app').classList.remove('hidden');
-      setApiStatus('ok', 'LIVE');
-      setTimeout(() => $('#boot-screen').remove(), 700);
-    }, 400);
+    // Reveal app first so #map has real dimensions, then init Leaflet
+    const bootEl = $('#boot-screen');
+    const appEl = $('#app');
+    bootEl.classList.add('fade-out');
+    appEl.classList.remove('hidden');
+    setApiStatus('connecting', 'LOADING');
+
+    // Next frame: map needs visible container size
+    requestAnimationFrame(() => {
+      initMap();
+      plotStations();
+      fitUSA(false);
+      // Second pass after layout settles
+      setTimeout(() => {
+        if (state.map) {
+          state.map.invalidateSize(true);
+          fitUSA(false);
+        }
+      }, 50);
+      setTimeout(() => bootEl.remove(), 500);
+      // Alerts load in background — does not block UI
+      refreshAlerts(true);
+    });
+  }
+
+  function fitUSA(animate) {
+    if (!state.map) return;
+    // Contiguous US bounds (exclude most of AK/HI for a true "USA overview")
+    const bounds = L.latLngBounds(
+      [24.5, -125.0], // SW
+      [49.5, -66.5]   // NE
+    );
+    state.map.fitBounds(bounds, {
+      padding: [12, 12],
+      animate: !!animate,
+      maxZoom: 5
+    });
   }
 
   // ── Map ──
   function initMap() {
+    // Esri World Dark Gray — free, no API key, works worldwide
+    // Fallback chain if a tile host fails
     state.map = L.map('map', {
-      center: [39.8, -98.5],
+      center: [39.5, -98.35],
       zoom: 4,
       minZoom: 3,
       maxZoom: 12,
       zoomControl: true,
-      attributionControl: true
+      attributionControl: true,
+      preferCanvas: true
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap &copy; CARTO · NWS · Iowa State Mesonet',
-      subdomains: 'abcd',
-      maxZoom: 19
-    }).addTo(state.map);
+    const basemap = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+      {
+        attribution: 'Esri · OpenStreetMap · NWS · Iowa State Mesonet',
+        maxZoom: 16,
+        maxNativeZoom: 16
+      }
+    );
+    basemap.addTo(state.map);
+
+    // Reference labels (also free, no key)
+    L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+      { maxZoom: 16, maxNativeZoom: 16, opacity: 0.85, pane: 'overlayPane' }
+    ).addTo(state.map);
 
     state.layers.stations = L.layerGroup().addTo(state.map);
     state.layers.alerts = L.layerGroup().addTo(state.map);
 
-    // Radar layers (off by default)
+    // Radar layers (off by default) — public Iowa State Mesonet, no key
     state.layers.radar = L.tileLayer(RADAR.baseRefl, {
       opacity: 0.65,
       maxZoom: 12,
@@ -140,28 +176,37 @@
       opacity: 0.6,
       maxZoom: 10
     });
+
+    // Keep center correct on resize
+    window.addEventListener('resize', () => {
+      if (state.map) state.map.invalidateSize(true);
+    });
+  }
+
+  function stationMarkerStyle(s) {
+    const selected = state.selected === s.code;
+    const hasAlert = s.alertCount > 0;
+    return {
+      radius: selected ? 8 : 5,
+      color: selected ? '#f59e0b' : hasAlert ? '#f97316' : '#0c111b',
+      weight: selected ? 2 : 1.5,
+      fillColor: selected ? '#f59e0b' : hasAlert ? '#f97316' : '#06b6d4',
+      fillOpacity: 0.95
+    };
   }
 
   function plotStations() {
+    if (!state.layers.stations) return;
     state.layers.stations.clearLayers();
     state.markers.clear();
+    // Circle markers (canvas-friendly) — much faster than per-station DOM icons
     state.stations.forEach((s) => {
-      const el = document.createElement('div');
-      el.className = 'wfo-marker';
-      if (s.alertCount > 0) el.classList.add('has-alert');
-      if (state.selected === s.code) el.classList.add('active');
-      const icon = L.divIcon({
-        className: '',
-        html: el.outerHTML,
-        iconSize: [14, 14],
-        iconAnchor: [7, 7]
-      });
-      const m = L.marker([s.lat, s.lon], { icon, title: `${s.code} — ${s.name}, ${s.state}` });
+      const m = L.circleMarker([s.lat, s.lon], stationMarkerStyle(s));
       m.on('click', () => selectStation(s.code));
       m.bindTooltip(`${s.code} · ${s.name}, ${s.state}`, {
         direction: 'top',
-        offset: [0, -8],
-        className: 'wfo-tip'
+        offset: [0, -6],
+        opacity: 0.95
       });
       state.layers.stations.addLayer(m);
       state.markers.set(s.code, m);
@@ -172,12 +217,7 @@
   function updateMarkerStyles() {
     state.stations.forEach((s) => {
       const m = state.markers.get(s.code);
-      if (!m) return;
-      const el = m.getElement();
-      if (!el) return;
-      const inner = el.querySelector('.wfo-marker') || el;
-      inner.classList.toggle('active', state.selected === s.code);
-      inner.classList.toggle('has-alert', s.alertCount > 0);
+      if (m) m.setStyle(stationMarkerStyle(s));
     });
   }
 
@@ -185,9 +225,15 @@
   async function refreshAlerts(isBoot) {
     try {
       if (!isBoot) setApiStatus('connecting', 'REFRESHING');
+      else setApiStatus('connecting', 'ALERTS…');
+      // Prefer status=actual; abort if NWS is very slow so UI stays responsive
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
       const res = await fetch(`${NWS.base}/alerts/active?status=actual`, {
-        headers: NWS.headers
+        headers: NWS.headers,
+        signal: ctrl ? ctrl.signal : undefined
       });
+      if (timer) clearTimeout(timer);
       if (!res.ok) throw new Error('alerts ' + res.status);
       const data = await res.json();
       const features = data.features || [];
@@ -772,9 +818,7 @@
     });
 
     // Map chips
-    $('#btn-fit-usa').addEventListener('click', () => {
-      state.map.setView([39.8, -98.5], 4, { animate: true });
-    });
+    $('#btn-fit-usa').addEventListener('click', () => fitUSA(true));
     $('#btn-fit-selected').addEventListener('click', () => {
       if (!state.selected) return;
       const st = state.stations.find((s) => s.code === state.selected);
